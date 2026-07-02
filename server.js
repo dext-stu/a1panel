@@ -26,9 +26,19 @@ const PORT = Number(process.env.A1_PORT || 7070);
 const HOST = process.env.A1_HOST || '127.0.0.1';
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
-const MODULES_FILE = path.join(ROOT, 'modules.json');
-const AUTH_FILE = path.join(ROOT, 'auth.json');
-const CONNECTION_FILE = path.join(ROOT, 'connection.json');
+// Where runtime state lives. Defaults to the project dir, but can be pointed
+// elsewhere (e.g. for testing) so it never clobbers your real data.
+const DATA_DIR = process.env.A1_DATA_DIR || ROOT;
+if (DATA_DIR !== ROOT) {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  } catch {
+    /* ignore */
+  }
+}
+const MODULES_FILE = path.join(DATA_DIR, 'modules.json');
+const AUTH_FILE = path.join(DATA_DIR, 'auth.json');
+const CONNECTION_FILE = path.join(DATA_DIR, 'connection.json');
 
 const API_VERSION = '2023-06-01';
 const DEFAULT_BASE_URL = process.env.A1_BASE_URL || 'https://ai.dext.top';

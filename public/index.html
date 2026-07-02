@@ -285,8 +285,13 @@ let currentRefreshMs = 0;
 let baseSub = '';
 let refreshTimer = null;
 let busyAction = false;
+let generating = false;        // true while a module is being (re)generated — blocks stray refreshes
+let currentGenAbort = null;    // AbortController of the in-flight generation
+let genToken = 0;              // bumps to invalidate a superseded generation's UI updates
 let lastError = null;          // last render/collect error for the active module (for 改进)
 let currentCompileError = null;
+const fullCache = new Map();   // id -> full module (render+meta); skip re-fetch on switch
+const dataCache = new Map();   // id -> last collect data; instant paint on re-open
 
 function metaFromModule(m) {
   return { id: m.id, title: m.title, category: m.category || '', refreshMs: m.refreshMs, actions: m.actions || [], generated: true, createdAt: m.createdAt };
@@ -329,8 +334,15 @@ function setHead(title, sub) {
 function enableTools(on) { for (const id of ['#refreshBtn', '#improveBtn', '#regenBtn', '#delBtn']) $(id).disabled = !on; }
 
 // ---- selecting / opening ----
+function cancelGeneration() {
+  genToken++;
+  generating = false;
+  if (currentGenAbort) { try { currentGenAbort.abort(); } catch {} currentGenAbort = null; }
+}
+
 async function selectModule(id) {
   if (busyAction) return;
+  cancelGeneration();             // abort any in-flight generation before switching
   activeId = id; buildSidebar();
   clearTimeout(refreshTimer);
   const meta = modules.get(id);
@@ -339,16 +351,41 @@ async function selectModule(id) {
 }
 
 async function openModule(id) {
-  try {
-    const { module } = await api('/api/module/' + encodeURIComponent(id));
-    if (id !== activeId) return;
-    showModule(module);
-    await runCollect();
-  } catch (e) {
-    if (e.status === 401) return handleAuthLoss(e);
-    if (e.status === 404) { modules.delete(id); buildSidebar(); showWelcome(); return; }
-    $('#viewBody').innerHTML = '<div class="state bad">' + escapeHtml(e.message) + '</div>';
+  let module = fullCache.get(id);
+  if (!module) {
+    const meta = modules.get(id);
+    setHead(meta ? meta.title : '', '加载中…');
+    if (!dataCache.has(id)) $('#viewBody').innerHTML = '<div class="state"><span class="spin"></span>加载模块…</div>';
+    try {
+      const r = await api('/api/module/' + encodeURIComponent(id));
+      if (id !== activeId) return;
+      module = r.module; fullCache.set(id, module);
+    } catch (e) {
+      if (e.status === 401) return handleAuthLoss(e);
+      if (e.status === 404) { modules.delete(id); fullCache.delete(id); dataCache.delete(id); buildSidebar(); showWelcome(); return; }
+      $('#viewBody').innerHTML = '<div class="state bad">' + escapeHtml(e.message) + '</div>';
+      return;
+    }
   }
+  if (id !== activeId) return;
+  showModule(module);
+  if (dataCache.has(id)) paint(dataCache.get(id), null);          // instant from cache
+  else $('#viewBody').innerHTML = '<div class="state"><span class="spin"></span>正在采集…</div>';
+  await runCollect();                                             // refresh in background
+}
+
+// Render collect data into the view (sanitized + width-contained).
+function paint(data, ms) {
+  const body = $('#viewBody');
+  let html, execErr = null;
+  try { html = renderFn(data); } catch (e) { execErr = 'render 执行出错：' + e.message; }
+  body.innerHTML = execErr
+    ? '<div class="state bad">' + escapeHtml(execErr) + '</div>'
+    : '<div class="mod-root">' + sanitizeHtml(html == null ? '' : String(html)) + '</div>';
+  lastError = currentCompileError || execErr || null;
+  $('#viewSub').textContent = baseSub + (ms != null
+    ? ' · 更新于 ' + new Date().toLocaleTimeString() + ' · ' + ms + 'ms'
+    : ' · 缓存，刷新中…');
 }
 
 function showModule(module) {
@@ -362,29 +399,24 @@ function showModule(module) {
 }
 
 async function runCollect() {
-  const id = activeId; if (!id || !renderFn) return;
+  const id = activeId; if (!id || !renderFn || generating) return;
   clearTimeout(refreshTimer);
   try {
     const res = await api('/api/module/' + encodeURIComponent(id) + '/run');
     if (id !== activeId) return;
-    const body = $('#viewBody');
     if (!res.ok) {
-      body.innerHTML = '<div class="state bad">采集失败：' + escapeHtml(res.error || '未知错误') + '</div>';
+      $('#viewBody').innerHTML = '<div class="state bad">采集失败：' + escapeHtml(res.error || '未知错误') + '</div>';
       lastError = '采集失败：' + (res.error || '未知错误');
     } else {
-      let html, execErr = null;
-      try { html = renderFn(res.data); }
-      catch (e) { execErr = 'render 执行出错：' + e.message; html = '<div class="state bad">' + escapeHtml(execErr) + '</div>'; }
-      body.innerHTML = execErr ? html : '<div class="mod-root">' + sanitizeHtml(html == null ? '' : String(html)) + '</div>';
-      lastError = currentCompileError || execErr || null;
-      $('#viewSub').textContent = baseSub + ' · 更新于 ' + new Date().toLocaleTimeString() + ' · ' + res.ms + 'ms';
+      dataCache.set(id, res.data);
+      paint(res.data, res.ms);
     }
   } catch (e) {
     if (e.status === 401) return handleAuthLoss(e);
     $('#viewBody').innerHTML = '<div class="state bad">' + escapeHtml(e.message) + '</div>';
     return;
   }
-  if (currentRefreshMs >= 2000 && !busyAction && id === activeId)
+  if (currentRefreshMs >= 2000 && !busyAction && !generating && id === activeId)
     refreshTimer = setTimeout(runCollect, currentRefreshMs);
 }
 
@@ -416,19 +448,26 @@ function viewGenerating(onStop) {
 }
 
 async function streamModule(path, body, knownTitle) {
+  const myToken = ++genToken;                       // this generation's identity
+  if (currentGenAbort) { try { currentGenAbort.abort(); } catch {} } // supersede any in-flight one
+  clearTimeout(refreshTimer); generating = true;    // stop any pending auto-refresh of the old version
   setHead(knownTitle || 'AI 模块', '正在生成…'); enableTools(false);
-  const ac = new AbortController();
+  const ac = new AbortController(); currentGenAbort = ac;
   const gen = viewGenerating(() => ac.abort());
   try {
-    const module = await streamRequest(path, body, (ev) => gen.onEvent(ev), ac.signal);
-    gen.stop();
+    const module = await streamRequest(path, body, (ev) => { if (myToken === genToken) gen.onEvent(ev); }, ac.signal);
+    if (myToken !== genToken) { gen.stop(); return; } // superseded — don't touch the view
+    gen.stop(); generating = false; currentGenAbort = null;
     modules.set(module.id, metaFromModule(module));
+    fullCache.set(module.id, module); dataCache.delete(module.id); // new code → fetch fresh data
     activeId = module.id; buildSidebar();
     showModule(module);
     await runCollect();
     return module;
   } catch (e) {
     gen.stop();
+    if (myToken !== genToken) return;                 // superseded — user moved on; ignore
+    generating = false; currentGenAbort = null;
     if (e.name === 'AbortError' || ac.signal.aborted) {
       setHead(knownTitle || 'AI 模块', '已终止');
       $('#viewBody').innerHTML =
@@ -475,7 +514,7 @@ $('#delBtn').onclick = async () => {
   if (!confirm('删除该模块？（预置模块下次点开会重新生成）')) return;
   const id = activeId;
   try { await api('/api/module/' + encodeURIComponent(id), { method: 'DELETE' }); } catch (e) { toast(e.message); }
-  modules.delete(id); showWelcome();
+  modules.delete(id); fullCache.delete(id); dataCache.delete(id); showWelcome();
 };
 $('#improveBtn').onclick = () => openModal('improve');
 $('#regenBtn').onclick = () => openModal('regen');
@@ -578,6 +617,7 @@ async function routeAfterLogin() {
 }
 async function enterApp(state) {
   editMode = false;
+  fullCache.clear(); dataCache.clear();
   const full = await api('/api/state');
   presets = full.presets || [];
   modules = new Map((full.modules || []).map(m => [m.id, m]));

@@ -34,7 +34,7 @@ node server.js
 
 ## 环境变量
 
-`A1_PORT`(默认 `7070`)、`A1_HOST`(默认 `127.0.0.1`)。
+`A1_PORT`(默认 `7070`)、`A1_HOST`(默认 `127.0.0.1`)、`A1_BASE_URL`(默认 Base URL)、`A1_DATA_DIR`(运行时状态 auth/modules/connection 的存放目录，默认项目目录)。
 
 ## 文件
 
