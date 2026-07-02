@@ -15,7 +15,7 @@ node server.js
 ## 三步
 
 1. **登录** — 首次启动时，服务在终端打印一次**初始登录密码**，首次打开登录页也显示一次；此后磁盘只保留 scrypt 哈希(`auth.json`)。忘记密码：删除 `auth.json` 重启即重新生成。
-2. **连接模型** — 填写 Base URL / API Key / 模型。默认 `https://api.anthropic.com`，但**不强制 Anthropic**：任何兼容 Anthropic Messages API 的网关都可以填，模型可自定义。API Key 只存在进程内存，不落盘。
+2. **连接模型** — 填写 Base URL / API Key / 模型。默认 Base URL 为 `https://ai.dext.top`（可用环境变量 `A1_BASE_URL` 改，或直接填官方 `https://api.anthropic.com`），**不强制 Anthropic**：任何兼容 Anthropic Messages API 的网关都可以填，模型可自定义。连接（Base URL / Key / 模型）保存在本机 `connection.json`（不入库），**重启不丢**；只有登录会话会过期，需重新登录。进面板后可用左下角「修改 API」随时改地址/模型/Key（Key 留空则沿用当前）。
 3. **点开左侧模块** — 概览 / Docker / 网站与证书 / 进程 / 服务 / 网络与端口 / 磁盘与文件 / 计划任务 / 系统日志。**点开哪个，AI 才生成那个**(全程流式，能看到它实时"思考 + 写代码")，生成完永久保留在 `modules.json`，下次秒开。也可「＋ 新建模块」用一句话定制。
 
 ## 一个模块 = AI 写的三段代码
@@ -42,3 +42,4 @@ node server.js
 - `public/index.html` — 前端(登录 / 连接 / 侧边栏面板三屏)，浅色米白 Claude 风、无 emoji
 - `auth.json` — 登录凭据(盐 + 哈希)，首次运行生成，**不入库**
 - `modules.json` — 已生成的模块定义，**不入库**
+- `connection.json` — 保存的连接(Base URL / 模型 / API Key)，**不入库**；含明文 Key，仅供本机自用

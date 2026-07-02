@@ -171,8 +171,9 @@
       </datalist>
     </div>
     <button class="primary" id="connectBtn" style="width:100%">连接并启动面板</button>
+    <button id="connectCancel" style="width:100%; margin-top:10px; display:none">返回面板</button>
     <div class="err" id="connectErr"></div>
-    <div class="hint">API Key 只保存在服务进程内存中，不写入磁盘。<br>面板会执行 AI 生成的代码来读取并操作本机；请只在你自己的机器上运行、不要暴露到公网。</div>
+    <div class="hint">API Key 保存在本机 connection.json（已在 .gitignore，不入库），重启不丢；只有登录会话会过期，需重新登录。<br>面板会执行 AI 生成的代码来读取并操作本机；请只在你自己的机器上运行、不要暴露到公网。</div>
   </div>
 </div>
 
@@ -186,7 +187,7 @@
       <div class="side-badge">主机 <b id="hostBadge">-</b></div>
       <div class="side-badge">模型 <b id="modelBadge">-</b></div>
       <div class="side-foot-btns">
-        <button class="ghost" id="disconnectBtn">断开</button>
+        <button class="ghost" id="editApiBtn">修改 API</button>
         <button class="ghost" id="logoutBtn">退出</button>
       </div>
     </div>
@@ -536,43 +537,66 @@ async function doLogin() {
   catch (e) { err.textContent = e.message; }
   finally { btn.disabled = false; btn.textContent = '登录'; }
 }
+let editMode = false;          // true when editing an existing connection
+let connBase = 'https://ai.dext.top', connModel = 'claude-sonnet-5';
+
 async function doConnect() {
   const baseUrl = $('#baseUrl').value.trim(), apiKey = $('#apiKey').value.trim(), model = $('#model').value.trim();
   const err = $('#connectErr'), btn = $('#connectBtn');
   err.textContent = '';
-  if (!apiKey) { err.textContent = '请填写 API Key'; return; }
+  if (!apiKey && !editMode) { err.textContent = '请填写 API Key'; return; } // in edit mode, blank = keep current
   if (!model) { err.textContent = '请填写模型名称'; return; }
-  btn.disabled = true; btn.textContent = '连接中…';
+  btn.disabled = true; btn.textContent = editMode ? '保存中…' : '连接中…';
   try { const s = await api('/api/session', { method: 'POST', body: { baseUrl, apiKey, model } }); await enterApp(s); }
   catch (e) { if (e.status === 401 && String(e.message).includes('登录')) show('login'); else err.textContent = e.message; }
-  finally { btn.disabled = false; btn.textContent = '连接并启动面板'; }
+  finally { btn.disabled = false; btn.textContent = editMode ? '保存' : '连接并启动面板'; }
+}
+function editApi() {
+  editMode = true;
+  $('#baseUrl').value = connBase || 'https://ai.dext.top';
+  $('#model').value = connModel || 'claude-sonnet-5';
+  $('#apiKey').value = '';
+  $('#apiKey').placeholder = '留空则沿用当前 Key';
+  $('#connectErr').textContent = '';
+  $('#connectBtn').textContent = '保存';
+  $('#connectCancel').style.display = 'block';
+  show('connect');
 }
 async function routeAfterLogin() {
   const s = await api('/api/state');
   if (s.connected) await enterApp(s);
-  else { $('#baseUrl').value = s.baseUrl || 'https://api.anthropic.com'; $('#model').value = s.model || 'claude-sonnet-5'; show('connect'); }
+  else {
+    editMode = false;
+    $('#baseUrl').value = s.baseUrl || 'https://ai.dext.top';
+    $('#model').value = s.model || 'claude-sonnet-5';
+    $('#apiKey').value = '';
+    $('#apiKey').placeholder = 'sk-ant-... 或你的网关密钥';
+    $('#connectBtn').textContent = '连接并启动面板';
+    $('#connectCancel').style.display = 'none';
+    show('connect');
+  }
 }
 async function enterApp(state) {
+  editMode = false;
   const full = await api('/api/state');
   presets = full.presets || [];
   modules = new Map((full.modules || []).map(m => [m.id, m]));
+  connBase = full.baseUrl || connBase;
+  connModel = full.model || connModel;
   $('#hostBadge').textContent = full.host || '-';
   $('#modelBadge').textContent = full.model || '-';
   show('app');
   buildSidebar();
   showWelcome();
 }
-async function disconnectLLM() {
-  try { await api('/api/disconnect', { method: 'POST' }); } catch {}
-  clearTimeout(refreshTimer); await routeAfterLogin();
-}
 async function logout() { try { await api('/api/panel-logout', { method: 'POST' }); } catch {} location.reload(); }
 
 $('#loginBtn').onclick = doLogin;
 $('#loginPw').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
 $('#connectBtn').onclick = doConnect;
+$('#connectCancel').onclick = () => { editMode = false; show('app'); };
 $('#apiKey').addEventListener('keydown', e => { if (e.key === 'Enter') doConnect(); });
-$('#disconnectBtn').onclick = disconnectLLM;
+$('#editApiBtn').onclick = editApi;
 $('#logoutBtn').onclick = logout;
 
 // bootstrap

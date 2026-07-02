@@ -3,6 +3,7 @@ node_modules/
 # runtime state — never commit
 auth.json
 modules.json
+connection.json
 widgets.json
 cookies.txt
 *.log

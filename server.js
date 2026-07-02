@@ -28,6 +28,7 @@ const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const MODULES_FILE = path.join(ROOT, 'modules.json');
 const AUTH_FILE = path.join(ROOT, 'auth.json');
+const CONNECTION_FILE = path.join(ROOT, 'connection.json');
 
 const API_VERSION = '2023-06-01';
 const DEFAULT_BASE_URL = process.env.A1_BASE_URL || 'https://ai.dext.top';
@@ -110,6 +111,33 @@ function isAuthed(req) {
 // LLM connection state (never persisted).
 // ---------------------------------------------------------------------------
 const session = { apiKey: null, model: 'claude-sonnet-5', baseUrl: DEFAULT_BASE_URL };
+
+// The LLM connection is persisted locally (single-user localhost tool) so it
+// survives a restart. Only the login session expires on restart.
+function loadConnection() {
+  try {
+    const c = JSON.parse(fs.readFileSync(CONNECTION_FILE, 'utf8'));
+    if (c && c.apiKey) {
+      session.apiKey = c.apiKey;
+      session.model = c.model || session.model;
+      session.baseUrl = c.baseUrl || session.baseUrl;
+    }
+  } catch {
+    /* none yet */
+  }
+}
+function saveConnection() {
+  fsp
+    .writeFile(
+      CONNECTION_FILE,
+      JSON.stringify({ baseUrl: session.baseUrl, model: session.model, apiKey: session.apiKey }, null, 2)
+    )
+    .catch((e) => console.error('persist connection:', e.message));
+}
+function clearConnection() {
+  session.apiKey = null;
+  fsp.unlink(CONNECTION_FILE).catch(() => {});
+}
 
 /** modules: id -> { id, title, category, refreshMs, collect, actions:{name:code}, render, createdAt } */
 let modules = new Map();
@@ -601,25 +629,27 @@ async function handleApi(req, res, url) {
 
   if (pathname === '/api/session' && method === 'POST') {
     const b = await readBody(req);
-    const key = String(b.apiKey || '').trim();
+    const key = String(b.apiKey || '').trim() || session.apiKey || ''; // blank = keep current key
     const model = String(b.model || '').trim();
     const baseUrl = String(b.baseUrl || DEFAULT_BASE_URL).trim() || DEFAULT_BASE_URL;
     if (!/^https?:\/\//i.test(baseUrl)) throw httpError(400, 'Base URL 需以 http(s):// 开头');
     if (!key) throw httpError(400, '请填写 API Key');
     if (!model) throw httpError(400, '请填写模型名称');
+    const prev = { apiKey: session.apiKey, model: session.model, baseUrl: session.baseUrl };
     session.apiKey = key;
     session.model = model;
     session.baseUrl = baseUrl;
     try {
       await validateConnection();
     } catch (e) {
-      session.apiKey = null;
+      Object.assign(session, prev); // restore previous connection on failure
       throw e;
     }
+    saveConnection();
     return sendJSON(res, 200, { connected: true, model, baseUrl });
   }
   if (pathname === '/api/disconnect' && method === 'POST') {
-    session.apiKey = null;
+    clearConnection();
     return sendJSON(res, 200, { connected: false });
   }
 
@@ -721,6 +751,7 @@ const server = http.createServer(async (req, res) => {
 
 initAuth();
 loadModules();
+loadConnection();
 server.listen(PORT, HOST, () => {
   console.log('');
   console.log('  a1panel — AI 运维面板');
