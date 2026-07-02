@@ -57,6 +57,7 @@ const PRESETS = [
   { id: 'disk', title: '磁盘与文件', brief: '磁盘与清理：各分区容量与使用率进度条；列出占用较大的目录或临时文件；提供 清理临时目录 等操作(带确认)。' },
   { id: 'cron', title: '计划任务', brief: '计划任务：列出计划/定时任务及状态，提供 启用/禁用/立即运行 操作。Windows 用 `Get-ScheduledTask`/schtasks，Linux 用 `crontab -l` 与 systemd timers。' },
   { id: 'logs', title: '系统日志', brief: '系统日志：展示最近的系统/错误日志条目(可分级、可筛选)，提供 刷新 操作。Windows 用 `Get-WinEvent`/`Get-EventLog`，Linux 用 journalctl 或 /var/log。以只读为主。' },
+  { id: 'terminal', title: '终端', brief: '一个可交互的命令终端：能输入并执行任意命令、以滚动回显显示输出历史。' },
 ];
 
 // ---------------------------------------------------------------------------
@@ -192,7 +193,7 @@ function makeExec() {
     new Promise((resolve, reject) => {
       cpExec(
         cmd,
-        { timeout: 12000, maxBuffer: 16 * 1024 * 1024, windowsHide: true, encoding: 'utf8', ...opts },
+        { timeout: 60000, maxBuffer: 32 * 1024 * 1024, windowsHide: true, encoding: 'utf8', ...opts },
         (err, stdout, stderr) => {
           if (err && err.killed) return reject(new Error('command timed out: ' + cmd));
           resolve({
@@ -361,54 +362,62 @@ async function validateConnection() {
 // ---------------------------------------------------------------------------
 function moduleSystem() {
   const win = process.platform === 'win32';
+  const shell = win ? 'cmd.exe (call `powershell -NoProfile -Command "..."` when you want PowerShell)' : '/bin/sh (call `bash -lc "..."` when you want bash)';
   return `You are the generation engine behind "a1panel", an AI-native server OPERATIONS panel
-(think 1Panel / Cockpit — you DO things, not just show metrics). You generate one MODULE at a
-time. A module is a full operational page with three parts, all as JS source strings:
+(like 1Panel / Cockpit — you DO things, not just show metrics). You generate ONE module: a full
+operational page built from three JS source strings.
+
+PROCESS — you return JSON with a "mode":
+  • mode:"ask" — when the request is underspecified (especially a free-form 新建 request) and the
+    answer would materially change the design. Give 1-4 focused "questions" (and optionally a short
+    "message" describing your plan). The user answers and you continue. Don't ask trivia; don't ask
+    when a preset/brief already makes the intent clear — just build.
+  • mode:"submit" — put the finished module in "module" (the three parts below). Only submit when you
+    can build something that matches what the user actually wants.
+Prefer one short ask round for vague new-module requests; then plan; then submit.
+
+THIS HOST: ${os.type()} ${os.release()} (${os.arch()}), platform "${process.platform}", ${os.cpus().length} CPU,
+hostname ${os.hostname()}, Node ${process.version}. Commands run through ${shell}. Write commands FOR THIS
+platform (${win ? 'Windows: PowerShell/cmd; os.loadavg() is unusable here' : 'Linux/Unix: ps, systemctl, ss, df, journalctl, crontab, etc.'}).
+
+You are NOT limited to a fixed set of queries. \`exec\` runs ANY shell command — there is no allowlist.
+Use whatever tools exist on the host. If a tool (docker/nginx/systemctl/…) is missing, detect it and
+show a clean empty state instead of failing.
 
 1) collect — async (ctx) => <JSON-serializable data>. Runs on the SERVER (Node.js).
-   ctx = { os, fs, path, platform, exec }
-     - exec(cmd) -> { stdout, stderr, code }. Never rejects on non-zero exit. 12s/command.
-       On this host commands run via ${win ? 'cmd.exe (use `powershell -NoProfile -Command "..."` for structured output — add `| ConvertTo-Json -Compress`)' : '/bin/sh'}.
-   Read the data the page needs (lists of containers/services/processes/ports/certs/disks...).
-   Be defensive: if a tool is absent (e.g. docker/nginx/systemctl not installed), return
-   { available:false, note:'...' } instead of throwing.
+   ctx = { os, fs, path, platform, exec }.  exec(cmd, {timeout}) -> { stdout, stderr, code };
+   never rejects on non-zero exit (inspect .code/.stderr); default 60s, pass {timeout: ms} for longer.
+   Read whatever the page needs. Return {} for pure-input modules (e.g. a terminal).
 
-2) actions — an array of { name, code }. Each code is: async (ctx) => <result>.
-   ctx = { os, fs, path, platform, exec, args }  (args = the button's data-args object)
-   These PERFORM operations: start/stop/restart a service or container, kill a process,
-   renew a cert, reload nginx, clean a temp dir, run a scheduled task, etc.
-   Return a short human-readable result string (or object). Keep it bounded (≈20s).
-   May be an empty array for read-only modules (e.g. logs).
+2) actions — array of { name, code }; each code is async (ctx) => <result>.
+   ctx = { os, fs, path, platform, exec, args }. \`args\` carries the button's data-args PLUS the current
+   value of every input in the module (see data-field below). Actions PERFORM things: start/stop/kill,
+   renew/reload, clean, OR run an arbitrary command the user typed. Return a string or JSON; it is shown
+   to the user AND appended to ui.log (see render). Keep individual actions reasonable; long commands are
+   fine (up to ~2min).
 
-3) render — (data) => "<html string>". Runs in the BROWSER. Returns ONLY the inner HTML of the module body.
-   - ONLY inline \`style="..."\` attributes. NEVER output <style>, <script>, <link>, <html>, <head>,
-     <body>, or <meta> — a stray <style>/<script> corrupts the ENTIRE page (breaks the sidebar/layout).
-     No CSS classes, no global rules. No external URLs/images/fonts. NO EMOJI anywhere.
-   - It must FIT its container — never widen the page. Do not set fixed pixel widths on top-level
-     wrappers; use width:100% and let it flow. For a wide table, wrap it in
-     <div style="overflow-x:auto;max-width:100%"> so it scrolls INSIDE the card instead of stretching it.
-   - LIGHT warm "Claude" theme: text #1f1e1d, muted #6b6862, accent #c96442, good #3d8a5f,
-     warn #b7791f, bad #bc4b39, hairlines #e7e4db, subtle fill #f3f1ea, card #ffffff.
-   - Make it look like a real ops panel: a summary row of headline numbers, then dense
-     tables/lists with a status column and, where relevant, PER-ROW operation buttons.
-   - Operation buttons MUST use this exact contract so the panel can execute them:
-       <button data-action="ACTION_NAME" data-args='{"id":"..."}' data-confirm="确定重启 X？">重启</button>
-     data-action = a name present in the actions array. data-args = a JSON object (single-quote
-     the attribute so inner JSON uses double quotes). data-confirm is optional; include it for
-     destructive actions. After an action runs the panel re-runs collect and re-renders.
-   - Guard against missing/partial data; if data.available === false, render a clean empty state
-     ("未检测到 …") instead of an error.
+3) render — (data, ui) => "<html string>". Runs in the BROWSER. Returns the module body's inner HTML.
+   - ui = { log: [...] } — the recent history of action results (oldest→newest), each
+     { name, args, result, error, at }. Use it to show output/history (this is how a TERMINAL shows
+     its scrollback).
+   - INTERACTIVITY (the panel wires it for you — you do NOT write any JS):
+       • Inputs: render <input data-field="cmd">, <textarea data-field="...">, or <select data-field="...">.
+         When an action button is clicked, EVERY [data-field] value in the module is merged into ctx.args
+         under its field name. Pressing Enter inside a data-field triggers the module's first action button.
+       • Action buttons: <button data-action="NAME" data-args='{"id":"x"}' data-confirm="确定？">标签</button>.
+         data-args is optional JSON (single-quote the attribute). data-confirm is optional (destructive ops).
+   - Building a TERMINAL: collect returns {} (or cwd); one action "run" does
+       async (ctx) => { const r = await ctx.exec(ctx.args.cmd, {timeout:120000}); return (r.stdout||'')+(r.stderr||''); }
+     render shows ui.log as scrollback (monospace) + <input data-field="cmd"> + <button data-action="run">运行</button>.
+     After each run the panel re-renders (input clears, re-focuses) — a working terminal, no JS needed.
+   - STYLING: ONLY inline style="…" attributes. Do NOT output <style>, <script>, <link>, <html>, <head>,
+     <body> (they'd be stripped and can corrupt the page). No CSS classes, no external URLs/images/fonts,
+     no emoji. Must FIT its container: width:100%, and wrap wide tables in
+     <div style="overflow-x:auto;max-width:100%">.
+   - Theme (light/warm): text #1f1e1d, muted #6b6862, accent #c96442, good #3d8a5f, warn #b7791f,
+     bad #bc4b39, hairline #e7e4db, fill #f3f1ea, card #ffffff, mono blocks on #1f1e1d bg with #e5e7eb text.
+   - Look like a real ops panel: headline numbers, dense tables with a status column, per-row action buttons.
 
-Host: ${os.type()} ${os.release()} (${os.arch()}), ${os.cpus().length} CPU, hostname ${os.hostname()}, Node ${process.version}, platform ${process.platform}.
-${
-  win
-    ? `Windows notes: os.loadavg() is [0,0,0] (don't use it). PowerShell for structured data:
-  memory os.totalmem/os.freemem; disks Get-CimInstance Win32_LogicalDisk; processes Get-Process;
-  services Get-Service; ports Get-NetTCPConnection; tasks Get-ScheduledTask; events Get-WinEvent.
-  docker/nginx/certbot are often NOT installed — detect and show an empty state.`
-    : `Linux notes: os.loadavg(); ps/kill; systemctl; ss/netstat; df -kP; crontab -l; journalctl;
-  docker/nginx/certbot may not be installed — detect and show an empty state.`
-}
 Return ONLY through the provided JSON schema. Titles/labels in Chinese, no emoji.`;
 }
 
@@ -438,7 +447,21 @@ const MODULE_SCHEMA = {
   additionalProperties: false,
 };
 
-async function generateModule({ presetId, prompt, hint, keepId, improveFrom, note, onEvent, signal }) {
+// The model returns EITHER a clarifying question round (mode:"ask") OR the final
+// module (mode:"submit"). This lets it gather requirements + plan before building.
+const GEN_SCHEMA = {
+  type: 'object',
+  properties: {
+    mode: { type: 'string', enum: ['ask', 'submit'], description: 'ask = 先向用户确认需求/计划；submit = 给出最终模块' },
+    message: { type: 'string', description: 'ask 时给用户看的简短说明或计划（可选）' },
+    questions: { type: 'array', items: { type: 'string' }, description: 'ask 时：1-4 个聚焦问题' },
+    module: MODULE_SCHEMA,
+  },
+  required: ['mode'],
+  additionalProperties: false,
+};
+
+function buildGenUser({ presetId, prompt, hint, improveFrom, note, qa }) {
   const preset = PRESETS.find((p) => p.id === presetId);
   let user;
   if (improveFrom) {
@@ -446,24 +469,39 @@ async function generateModule({ presetId, prompt, hint, keepId, improveFrom, not
     user =
       `修复并改进现有模块「${improveFrom.title}」。在保持整体设计与功能的前提下把它修好，返回修正后的【完整】模块（不要从零重写成完全不同的东西）。\n` +
       (note ? `需要解决的问题 / 改进要求：${note}\n` : '请先自查 collect / actions / render 是否有语法或逻辑错误并修复。\n') +
-      `\n下面是当前实现：\n` +
-      `--- 当前 collect ---\n${improveFrom.collect}\n` +
-      `--- 当前 actions ---\n${JSON.stringify(actionsSrc)}\n` +
-      `--- 当前 render ---\n${improveFrom.render}\n`;
+      `\n下面是当前实现：\n--- 当前 collect ---\n${improveFrom.collect}\n--- 当前 actions ---\n${JSON.stringify(actionsSrc)}\n--- 当前 render ---\n${improveFrom.render}\n`;
   } else if (preset) {
-    user = `Build the "${preset.title}" module.\n目标：${preset.brief}\n`;
+    user = `构建「${preset.title}」模块。参考方向：${preset.brief}\n`;
   } else if (prompt) {
-    user = `Build ONE operations module for this request:\n"""${prompt}"""\n`;
+    user = `用户想新建一个运维模块，描述如下：\n"""${prompt}"""\n`;
   } else {
-    user = `Build ONE genuinely useful operations module for this machine.`;
+    user = `为这台机器构建一个有用的运维模块。`;
   }
   if (hint) user += `\n用户对上一版不满意，请据此改进并做出明显不同：“${hint}”。\n`;
-  user += `\nWrite complete, working collect / actions / render. Every function must be valid, parseable JS. Operational (real per-row buttons where it makes sense). No emoji. Return via the schema.`;
+  if (Array.isArray(qa) && qa.length) {
+    user += `\n你与用户的问答记录（据此完成设计，不要重复问已答过的）：\n`;
+    qa.forEach((r, i) => {
+      user += `[第${i + 1}轮] 你问：${(r.questions || []).join(' / ')}\n用户答：${(r.answers || []).filter(Boolean).join(' / ') || '（用户让你自行决定，按合理默认来）'}\n`;
+    });
+  }
+  return user;
+}
 
-  // No artificial cap on complexity: give a very high ceiling so large modules
-  // finish instead of being truncated. The user can stop generation manually.
-  const raw = await streamJSON({ system: moduleSystem(), user, schema: MODULE_SCHEMA, maxTokens: 64000, onEvent, signal });
+async function generateGen(opts) {
+  // High ceiling so complex modules aren't truncated; user can stop manually.
+  return streamJSON({
+    system: moduleSystem(),
+    user: buildGenUser(opts),
+    schema: GEN_SCHEMA,
+    maxTokens: 64000,
+    onEvent: opts.onEvent,
+    signal: opts.signal,
+  });
+}
 
+function normalizeModule(raw, { presetId, keepId, improveFrom }) {
+  raw = raw || {};
+  const preset = PRESETS.find((p) => p.id === presetId);
   const id =
     keepId ||
     (improveFrom && improveFrom.id) ||
@@ -502,12 +540,23 @@ async function runGenStream(res, opts) {
     if (!finished) ac.abort();
   });
   try {
-    const mod = await generateModule({ ...opts, signal: ac.signal, onEvent: (e) => stream.send(e) });
-    if (opts.prevCategory && !mod.category) mod.category = opts.prevCategory;
+    const raw = await generateGen({ ...opts, signal: ac.signal, onEvent: (e) => stream.send(e) });
     finished = true;
-    modules.set(mod.id, mod);
-    saveModules();
-    stream.send({ t: 'done', module: moduleFull(mod) });
+    if (raw && raw.mode === 'ask') {
+      stream.send({
+        t: 'ask',
+        message: String(raw.message || ''),
+        questions: Array.isArray(raw.questions) ? raw.questions.map(String).filter(Boolean) : [],
+      });
+    } else if (!raw || !raw.module) {
+      stream.send({ t: 'error', e: '模型未返回模块，请重试或点「改进」。' });
+    } else {
+      const mod = normalizeModule(raw.module, opts);
+      if (opts.prevCategory && !mod.category) mod.category = opts.prevCategory;
+      modules.set(mod.id, mod);
+      saveModules();
+      stream.send({ t: 'done', module: moduleFull(mod) });
+    }
   } catch (e) {
     finished = true;
     if (!ac.signal.aborted) stream.send({ t: 'error', e: String(e.message || e) });
@@ -672,6 +721,7 @@ async function handleApi(req, res, url) {
       presetId: b.presetId,
       prompt: b.prompt,
       hint: b.hint,
+      qa: b.qa,
       keepId: b.keepId || b.presetId || undefined,
     });
   }
@@ -695,7 +745,7 @@ async function handleApi(req, res, url) {
       const mod = modules.get(id);
       if (!mod) throw httpError(404, 'module not found');
       try {
-        const { data, ms } = await runFn(mod.collect, {}, 20000);
+        const { data, ms } = await runFn(mod.collect, {}, 90000);
         return sendJSON(res, 200, { ok: true, data, ms });
       } catch (e) {
         return sendJSON(res, 200, { ok: false, error: String(e.message || e) });
@@ -709,7 +759,7 @@ async function handleApi(req, res, url) {
       const code = mod.actions && mod.actions[name];
       if (!code) throw httpError(404, '未知操作：' + name);
       try {
-        const { data, ms } = await runFn(code, { args: b.args || {} }, 25000);
+        const { data, ms } = await runFn(code, { args: b.args || {} }, 150000);
         return sendJSON(res, 200, { ok: true, result: data, ms });
       } catch (e) {
         return sendJSON(res, 200, { ok: false, error: String(e.message || e) });
@@ -724,6 +774,7 @@ async function handleApi(req, res, url) {
         presetId: isPreset ? id : undefined,
         prompt: !isPreset ? (prev ? prev.title : undefined) : undefined,
         hint: b.hint || undefined,
+        qa: b.qa,
         keepId: id,
         prevCategory: prev && prev.category,
       });
@@ -736,6 +787,7 @@ async function handleApi(req, res, url) {
       return runGenStream(res, {
         improveFrom: prev,
         note: b.note || b.hint || undefined,
+        qa: b.qa,
         keepId: id,
         prevCategory: prev.category,
       });

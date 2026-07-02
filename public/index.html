@@ -263,7 +263,7 @@ async function streamRequest(path, body, onEvent, signal) {
       const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
       if (!line) continue;
       let ev; try { ev = JSON.parse(line); } catch { continue; }
-      if (ev.t === 'done') result = ev.module;
+      if (ev.t === 'done' || ev.t === 'ask') result = ev;
       else if (ev.t === 'error') { const e = new Error(ev.e); e.gen = true; throw e; }
       else if (onEvent) onEvent(ev);
     }
@@ -292,12 +292,13 @@ let lastError = null;          // last render/collect error for the active modul
 let currentCompileError = null;
 const fullCache = new Map();   // id -> full module (render+meta); skip re-fetch on switch
 const dataCache = new Map();   // id -> last collect data; instant paint on re-open
+let actionResults = [];        // ui.log: recent action outputs (terminal scrollback), reset per module
 
 function metaFromModule(m) {
   return { id: m.id, title: m.title, category: m.category || '', refreshMs: m.refreshMs, actions: m.actions || [], generated: true, createdAt: m.createdAt };
 }
 function compileRender(src) {
-  try { return { fn: new Function('data', '"use strict"; const r = (' + src + '); return r(data);') }; }
+  try { return { fn: new Function('data', 'ui', '"use strict"; const r = (' + src + '); return r(data, ui);') }; }
   catch (e) { const msg = 'render 编译失败：' + e.message; return { fn: () => '<div class="state bad">' + escapeHtml(msg) + '</div>', error: msg }; }
 }
 function presetTitle(id) { const p = presets.find(x => x.id === id); return p ? p.title : ''; }
@@ -378,7 +379,7 @@ async function openModule(id) {
 function paint(data, ms) {
   const body = $('#viewBody');
   let html, execErr = null;
-  try { html = renderFn(data); } catch (e) { execErr = 'render 执行出错：' + e.message; }
+  try { html = renderFn(data, { log: actionResults }); } catch (e) { execErr = 'render 执行出错：' + e.message; }
   body.innerHTML = execErr
     ? '<div class="state bad">' + escapeHtml(execErr) + '</div>'
     : '<div class="mod-root">' + sanitizeHtml(html == null ? '' : String(html)) + '</div>';
@@ -389,6 +390,7 @@ function paint(data, ms) {
 }
 
 function showModule(module) {
+  actionResults = [];           // fresh action log per module open/generate
   const c = compileRender(module.render);
   renderFn = c.fn; currentCompileError = c.error || null; lastError = c.error || null;
   currentRefreshMs = module.refreshMs || 0;
@@ -447,6 +449,35 @@ function viewGenerating(onStop) {
   };
 }
 
+// The AI asked for clarification before building. Show its plan + questions,
+// collect answers, and resubmit with the accumulated Q&A.
+function showAskForm(ev, path, body, knownTitle) {
+  setHead(knownTitle || 'AI 模块', '需要你确认'); enableTools(false);
+  const qs = (ev.questions && ev.questions.length) ? ev.questions : ['请补充你的具体要求'];
+  let html = '<div style="max-width:720px">';
+  if (ev.message)
+    html += '<div style="background:var(--fill);border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:14px;white-space:pre-wrap">' + escapeHtml(ev.message) + '</div>';
+  html += '<div style="font-weight:600;margin-bottom:12px">AI 想先确认几个问题：</div>';
+  qs.forEach((q, i) => {
+    html += '<div style="margin-bottom:12px"><div style="margin-bottom:6px">' + escapeHtml(q) + '</div>' +
+      '<input class="ask-a" data-i="' + i + '" style="width:100%" placeholder="你的回答（可留空让 AI 自行决定）"></div>';
+  });
+  html += '<div style="display:flex;gap:10px;margin-top:6px">' +
+    '<button class="primary" id="askSubmit">提交并继续</button>' +
+    '<button id="askAuto">让 AI 自行决定</button></div></div>';
+  $('#viewBody').innerHTML = html;
+  const go = (answers) => {
+    const qa = (body.qa || []).concat([{ questions: qs, answers }]);
+    streamModule(path, Object.assign({}, body, { qa }), knownTitle);
+  };
+  $('#askSubmit').onclick = () =>
+    go(qs.map((_, i) => { const el = $('#viewBody').querySelector('.ask-a[data-i="' + i + '"]'); return el ? el.value.trim() : ''; }));
+  $('#askAuto').onclick = () => go(qs.map(() => ''));
+  $('#viewBody').querySelectorAll('.ask-a').forEach(el =>
+    el.addEventListener('keydown', e => { if (e.key === 'Enter') $('#askSubmit').click(); }));
+  const first = $('#viewBody').querySelector('.ask-a'); if (first) first.focus();
+}
+
 async function streamModule(path, body, knownTitle) {
   const myToken = ++genToken;                       // this generation's identity
   if (currentGenAbort) { try { currentGenAbort.abort(); } catch {} } // supersede any in-flight one
@@ -455,9 +486,11 @@ async function streamModule(path, body, knownTitle) {
   const ac = new AbortController(); currentGenAbort = ac;
   const gen = viewGenerating(() => ac.abort());
   try {
-    const module = await streamRequest(path, body, (ev) => { if (myToken === genToken) gen.onEvent(ev); }, ac.signal);
+    const ev = await streamRequest(path, body, (e) => { if (myToken === genToken) gen.onEvent(e); }, ac.signal);
     if (myToken !== genToken) { gen.stop(); return; } // superseded — don't touch the view
     gen.stop(); generating = false; currentGenAbort = null;
+    if (ev.t === 'ask') { showAskForm(ev, path, body, knownTitle); return; } // AI wants to clarify first
+    const module = ev.module;
     modules.set(module.id, metaFromModule(module));
     fullCache.set(module.id, module); dataCache.delete(module.id); // new code → fetch fresh data
     activeId = module.id; buildSidebar();
@@ -484,27 +517,56 @@ async function streamModule(path, body, knownTitle) {
 }
 
 // ---- action execution (event delegation) ----
-$('#viewBody').addEventListener('click', async (e) => {
+// Gather every [data-field] value in the module (inputs → action args).
+function collectFields() {
+  const out = {};
+  document.querySelectorAll('#viewBody [data-field]').forEach(el => {
+    const k = el.getAttribute('data-field'); if (!k) return;
+    out[k] = (el.type === 'checkbox') ? el.checked : el.value;
+  });
+  return out;
+}
+async function runAction(name, dataArgs, btn) {
+  if (!activeId || busyAction) return;
+  const args = Object.assign({}, dataArgs || {}, collectFields());
+  busyAction = true; clearTimeout(refreshTimer);
+  let label; if (btn) { label = btn.textContent; btn.disabled = true; btn.textContent = '执行中…'; }
+  const entry = { name, args, at: Date.now() };
+  try {
+    const res = await api('/api/module/' + encodeURIComponent(activeId) + '/action', { method: 'POST', body: { name, args } });
+    if (res.ok) { entry.result = res.result; const s = typeof res.result === 'string' ? res.result : ''; toast(s ? (s.length > 80 ? s.slice(0, 80) + '…' : s) : '操作已完成'); }
+    else { entry.error = res.error; toast('操作失败：' + res.error); }
+  } catch (err) {
+    if (err.status === 401) { busyAction = false; return handleAuthLoss(err); }
+    entry.error = err.message; toast('操作失败：' + err.message);
+  } finally {
+    busyAction = false;
+    if (btn && btn.isConnected) { btn.disabled = false; btn.textContent = label; }
+  }
+  actionResults.push(entry);
+  if (actionResults.length > 100) actionResults.shift();
+  await runCollect();                                  // re-render with the new ui.log
+  const f = $('#viewBody').querySelector('input[data-field], textarea[data-field]');
+  if (f) { try { f.focus(); } catch {} }               // keep terminal-style flow
+}
+$('#viewBody').addEventListener('click', (e) => {
   const btn = e.target.closest('[data-action]');
   if (!btn || !activeId) return;
   const name = btn.getAttribute('data-action');
-  let args = {}; try { args = JSON.parse(btn.getAttribute('data-args') || '{}'); } catch {}
+  let dataArgs = {}; try { dataArgs = JSON.parse(btn.getAttribute('data-args') || '{}'); } catch {}
   const confirmText = btn.getAttribute('data-confirm');
   if (confirmText && !confirm(confirmText)) return;
-  busyAction = true; clearTimeout(refreshTimer);
-  const label = btn.textContent; btn.disabled = true; btn.textContent = '执行中…';
-  try {
-    const res = await api('/api/module/' + encodeURIComponent(activeId) + '/action', { method: 'POST', body: { name, args } });
-    if (res.ok) toast(typeof res.result === 'string' ? res.result : (res.result && res.result.message) || '操作已完成');
-    else toast('操作失败：' + res.error);
-  } catch (err) {
-    if (err.status === 401) { busyAction = false; return handleAuthLoss(err); }
-    toast('操作失败：' + err.message);
-  } finally {
-    busyAction = false;
-    if (btn.isConnected) { btn.disabled = false; btn.textContent = label; }
-  }
-  runCollect();
+  runAction(name, dataArgs, btn);
+});
+// Enter inside an input field triggers the module's first action button.
+$('#viewBody').addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  const field = e.target.closest('[data-field]');
+  if (!field) return;
+  if (field.tagName === 'TEXTAREA' && !e.ctrlKey && !e.metaKey) return; // textarea: Ctrl/Cmd+Enter
+  e.preventDefault();
+  const btn = $('#viewBody').querySelector('[data-action]');
+  if (btn) btn.click();
 });
 
 // ---- head buttons ----
