@@ -90,6 +90,8 @@
   .welcome .big { font-size: 22px; font-weight: 650; letter-spacing: -.01em; color: var(--text); }
   .welcome p { margin: 12px 0 0; line-height: 1.7; }
 
+  /* structural guard: wide AI content scrolls inside the card, never widens the page */
+  .mod-root { max-width: 100%; overflow-x: auto; }
   /* default styling so AI-rendered content looks consistent even if unstyled */
   .view-body table { border-collapse: collapse; width: 100%; }
   .view-body th, .view-body td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); font-size: 13px; vertical-align: middle; }
@@ -372,7 +374,7 @@ async function runCollect() {
       let html, execErr = null;
       try { html = renderFn(res.data); }
       catch (e) { execErr = 'render 执行出错：' + e.message; html = '<div class="state bad">' + escapeHtml(execErr) + '</div>'; }
-      body.innerHTML = execErr ? html : sanitizeHtml(html == null ? '' : String(html));
+      body.innerHTML = execErr ? html : '<div class="mod-root">' + sanitizeHtml(html == null ? '' : String(html)) + '</div>';
       lastError = currentCompileError || execErr || null;
       $('#viewSub').textContent = baseSub + ' · 更新于 ' + new Date().toLocaleTimeString() + ' · ' + res.ms + 'ms';
     }
