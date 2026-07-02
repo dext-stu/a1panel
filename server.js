@@ -30,7 +30,7 @@ const MODULES_FILE = path.join(ROOT, 'modules.json');
 const AUTH_FILE = path.join(ROOT, 'auth.json');
 
 const API_VERSION = '2023-06-01';
-const DEFAULT_BASE_URL = 'https://api.anthropic.com';
+const DEFAULT_BASE_URL = process.env.A1_BASE_URL || 'https://ai.dext.top';
 
 // ---------------------------------------------------------------------------
 // Sidebar preset modules. These are just the MENU — nothing is generated until
@@ -188,7 +188,7 @@ async function runFn(code, extra = {}, timeoutMs = 20000) {
 // ---------------------------------------------------------------------------
 // LLM helpers (Base URL configurable).
 // ---------------------------------------------------------------------------
-async function llmFetch(pathname, body, { stream } = {}) {
+async function llmFetch(pathname, body, { stream, signal } = {}) {
   if (!session.apiKey) throw httpError(401, '未连接 LLM：请先填写 API Key');
   const base = session.baseUrl.replace(/\/+$/, '');
   return fetch(base + pathname, {
@@ -199,6 +199,7 @@ async function llmFetch(pathname, body, { stream } = {}) {
       'content-type': 'application/json',
     },
     body: JSON.stringify(stream ? { ...body, stream: true } : body),
+    signal,
   });
 }
 
@@ -232,7 +233,7 @@ function extractJSON(text) {
   return null;
 }
 
-async function streamJSON({ system, user, schema, maxTokens = 16000, onEvent }) {
+async function streamJSON({ system, user, schema, maxTokens = 16000, onEvent, signal }) {
   const res = await llmFetch(
     '/v1/messages',
     {
@@ -242,7 +243,7 @@ async function streamJSON({ system, user, schema, maxTokens = 16000, onEvent }) 
       messages: [{ role: 'user', content: user }],
       output_config: { format: { type: 'json_schema', schema } },
     },
-    { stream: true }
+    { stream: true, signal }
   );
   if (!res.ok || !res.body) {
     const t = await res.text().catch(() => '');
@@ -399,7 +400,7 @@ const MODULE_SCHEMA = {
   additionalProperties: false,
 };
 
-async function generateModule({ presetId, prompt, hint, keepId, improveFrom, note, onEvent }) {
+async function generateModule({ presetId, prompt, hint, keepId, improveFrom, note, onEvent, signal }) {
   const preset = PRESETS.find((p) => p.id === presetId);
   let user;
   if (improveFrom) {
@@ -421,7 +422,9 @@ async function generateModule({ presetId, prompt, hint, keepId, improveFrom, not
   if (hint) user += `\n用户对上一版不满意，请据此改进并做出明显不同：“${hint}”。\n`;
   user += `\nWrite complete, working collect / actions / render. Every function must be valid, parseable JS. Operational (real per-row buttons where it makes sense). No emoji. Return via the schema.`;
 
-  const raw = await streamJSON({ system: moduleSystem(), user, schema: MODULE_SCHEMA, maxTokens: 32000, onEvent });
+  // No artificial cap on complexity: give a very high ceiling so large modules
+  // finish instead of being truncated. The user can stop generation manually.
+  const raw = await streamJSON({ system: moduleSystem(), user, schema: MODULE_SCHEMA, maxTokens: 64000, onEvent, signal });
 
   const id =
     keepId ||
@@ -445,6 +448,33 @@ async function generateModule({ presetId, prompt, hint, keepId, improveFrom, not
     render: String(raw.render || ''),
     createdAt: Date.now(),
   };
+}
+
+/**
+ * Drive a streamed generation to the client. Wires an AbortController to the
+ * response so that when the browser aborts (the "终止" button) or disconnects,
+ * the upstream LLM request is aborted too — stopping token spend — and nothing
+ * partial is persisted.
+ */
+async function runGenStream(res, opts) {
+  const stream = startStream(res);
+  const ac = new AbortController();
+  let finished = false;
+  res.on('close', () => {
+    if (!finished) ac.abort();
+  });
+  try {
+    const mod = await generateModule({ ...opts, signal: ac.signal, onEvent: (e) => stream.send(e) });
+    if (opts.prevCategory && !mod.category) mod.category = opts.prevCategory;
+    finished = true;
+    modules.set(mod.id, mod);
+    saveModules();
+    stream.send({ t: 'done', module: moduleFull(mod) });
+  } catch (e) {
+    finished = true;
+    if (!ac.signal.aborted) stream.send({ t: 'error', e: String(e.message || e) });
+  }
+  stream.end();
 }
 
 // ---------------------------------------------------------------------------
@@ -598,22 +628,12 @@ async function handleApi(req, res, url) {
   if (pathname === '/api/module' && method === 'POST') {
     if (!session.apiKey) throw httpError(401, '未连接 LLM：请先填写 API Key');
     const b = await readBody(req);
-    const stream = startStream(res);
-    try {
-      const mod = await generateModule({
-        presetId: b.presetId,
-        prompt: b.prompt,
-        hint: b.hint,
-        keepId: b.keepId || b.presetId || undefined,
-        onEvent: (e) => stream.send(e),
-      });
-      modules.set(mod.id, mod);
-      saveModules();
-      stream.send({ t: 'done', module: moduleFull(mod) });
-    } catch (e) {
-      stream.send({ t: 'error', e: String(e.message || e) });
-    }
-    return stream.end();
+    return runGenStream(res, {
+      presetId: b.presetId,
+      prompt: b.prompt,
+      hint: b.hint,
+      keepId: b.keepId || b.presetId || undefined,
+    });
   }
 
   const m = pathname.match(/^\/api\/module\/([^/]+)(?:\/(run|action|regenerate|improve))?$/);
@@ -660,45 +680,25 @@ async function handleApi(req, res, url) {
       const b = await readBody(req);
       const prev = modules.get(id);
       const isPreset = PRESETS.some((p) => p.id === id);
-      const stream = startStream(res);
-      try {
-        const mod = await generateModule({
-          presetId: isPreset ? id : undefined,
-          prompt: !isPreset ? (prev ? prev.title : undefined) : undefined,
-          hint: b.hint || undefined,
-          keepId: id,
-          onEvent: (e) => stream.send(e),
-        });
-        if (prev && prev.category && !mod.category) mod.category = prev.category;
-        modules.set(id, mod);
-        saveModules();
-        stream.send({ t: 'done', module: moduleFull(mod) });
-      } catch (e) {
-        stream.send({ t: 'error', e: String(e.message || e) });
-      }
-      return stream.end();
+      return runGenStream(res, {
+        presetId: isPreset ? id : undefined,
+        prompt: !isPreset ? (prev ? prev.title : undefined) : undefined,
+        hint: b.hint || undefined,
+        keepId: id,
+        prevCategory: prev && prev.category,
+      });
     }
     if (sub === 'improve' && method === 'POST') {
       if (!session.apiKey) throw httpError(401, '未连接 LLM：请先填写 API Key');
       const prev = modules.get(id);
       if (!prev) throw httpError(404, 'module not found');
       const b = await readBody(req);
-      const stream = startStream(res);
-      try {
-        const mod = await generateModule({
-          improveFrom: prev,
-          note: b.note || b.hint || undefined,
-          keepId: id,
-          onEvent: (e) => stream.send(e),
-        });
-        if (prev.category && !mod.category) mod.category = prev.category;
-        modules.set(id, mod);
-        saveModules();
-        stream.send({ t: 'done', module: moduleFull(mod) });
-      } catch (e) {
-        stream.send({ t: 'error', e: String(e.message || e) });
-      }
-      return stream.end();
+      return runGenStream(res, {
+        improveFrom: prev,
+        note: b.note || b.hint || undefined,
+        keepId: id,
+        prevCategory: prev.category,
+      });
     }
   }
 

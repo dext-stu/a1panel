@@ -116,6 +116,8 @@
             font-size: 12px; line-height: 1.55; color: var(--faint); white-space: pre-wrap; word-break: break-word; }
   .genlog .think { color: var(--accent-ink); }
   .genlog:empty { display: none; }
+  .gen-stop { padding: 4px 12px; font-size: 12px; border-color: #e3c4bb; color: var(--bad); }
+  .gen-stop:hover { background: #fbeeea; border-color: #e3c4bb; }
 
   /* modal */
   .modal-bg { position: fixed; inset: 0; background: rgba(31,30,29,.28); display: none; place-items: center; z-index: 50; padding: 20px; }
@@ -241,8 +243,8 @@ async function api(path, opts = {}) {
   if (!res.ok) { const e = new Error(data.error || ('HTTP ' + res.status)); e.status = res.status; throw e; }
   return data;
 }
-async function streamRequest(path, body, onEvent) {
-  const res = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+async function streamRequest(path, body, onEvent, signal) {
+  const res = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal });
   if (!res.ok || !res.body) {
     const d = await res.json().catch(() => ({}));
     const e = new Error(d.error || ('HTTP ' + res.status)); e.status = res.status; throw e;
@@ -384,11 +386,14 @@ async function runCollect() {
 }
 
 // ---- generation (streaming) ----
-function viewGenerating() {
+function viewGenerating(onStop) {
   const body = $('#viewBody');
   body.innerHTML =
     '<div class="gen"><div class="genhead"><span class="spin"></span>' +
-    '<span class="genlabel">模型思考中…</span><span class="gentime">0.0s</span></div><pre class="genlog"></pre></div>';
+    '<span class="genlabel">模型思考中…</span><span class="gentime">0.0s</span>' +
+    '<button class="gen-stop" id="genStop">终止</button></div><pre class="genlog"></pre></div>';
+  const stopBtn = body.querySelector('#genStop');
+  if (stopBtn && onStop) stopBtn.onclick = () => { stopBtn.disabled = true; stopBtn.textContent = '正在终止…'; onStop(); };
   const start = performance.now();
   const timer = setInterval(() => { const t = body.querySelector('.gentime'); if (t) t.textContent = ((performance.now() - start) / 1000).toFixed(1) + 's'; }, 100);
   let sawText = false;
@@ -409,9 +414,10 @@ function viewGenerating() {
 
 async function streamModule(path, body, knownTitle) {
   setHead(knownTitle || 'AI 模块', '正在生成…'); enableTools(false);
-  const gen = viewGenerating();
+  const ac = new AbortController();
+  const gen = viewGenerating(() => ac.abort());
   try {
-    const module = await streamRequest(path, body, (ev) => gen.onEvent(ev));
+    const module = await streamRequest(path, body, (ev) => gen.onEvent(ev), ac.signal);
     gen.stop();
     modules.set(module.id, metaFromModule(module));
     activeId = module.id; buildSidebar();
@@ -420,6 +426,15 @@ async function streamModule(path, body, knownTitle) {
     return module;
   } catch (e) {
     gen.stop();
+    if (e.name === 'AbortError' || ac.signal.aborted) {
+      setHead(knownTitle || 'AI 模块', '已终止');
+      $('#viewBody').innerHTML =
+        '<div class="welcome"><div class="big">已终止生成</div>' +
+        '<p>本次生成已停止，未保存。可以重新生成。</p>' +
+        '<button class="primary" id="genRetry">重新生成</button></div>';
+      $('#genRetry').onclick = () => streamModule(path, body, knownTitle);
+      return;
+    }
     if (e.status === 401) return handleAuthLoss(e);
     $('#viewBody').innerHTML = '<div class="state bad">生成失败：' + escapeHtml(e.message) + '</div>';
     enableTools(true);
