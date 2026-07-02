@@ -202,7 +202,37 @@ async function llmFetch(pathname, body, { stream } = {}) {
   });
 }
 
-async function streamJSON({ system, user, schema, maxTokens = 12000, onEvent }) {
+/** Best-effort JSON extraction: tolerate code fences / surrounding prose from
+ *  gateways that don't honor structured output. */
+function extractJSON(text) {
+  let s = String(text || '').trim();
+  if (!s) return null;
+  try {
+    return JSON.parse(s);
+  } catch {
+    /* try harder below */
+  }
+  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) {
+    try {
+      return JSON.parse(fence[1].trim());
+    } catch {
+      /* fall through */
+    }
+  }
+  const i = s.indexOf('{');
+  const j = s.lastIndexOf('}');
+  if (i >= 0 && j > i) {
+    try {
+      return JSON.parse(s.slice(i, j + 1));
+    } catch {
+      /* give up */
+    }
+  }
+  return null;
+}
+
+async function streamJSON({ system, user, schema, maxTokens = 16000, onEvent }) {
   const res = await llmFetch(
     '/v1/messages',
     {
@@ -262,11 +292,11 @@ async function streamJSON({ system, user, schema, maxTokens = 12000, onEvent }) 
     }
   }
   if (stopReason === 'refusal') throw httpError(422, '模型出于安全策略拒绝了该请求，请换个说法重试。');
-  try {
-    return JSON.parse(full);
-  } catch {
-    throw httpError(502, '模型返回的 JSON 无法解析。');
-  }
+  const parsed = extractJSON(full);
+  if (parsed) return parsed;
+  if (stopReason === 'max_tokens')
+    throw httpError(502, '模型输出被截断（达到 max_tokens 上限）。请再试一次，或点「改进」让它精简，或换用输出上限更高的模型。');
+  throw httpError(502, '模型返回的内容无法解析为 JSON（可能是网关未按结构化格式返回，或输出被截断）。可再试一次，或点「改进」修复。');
 }
 
 async function validateConnection() {
@@ -311,8 +341,13 @@ time. A module is a full operational page with three parts, all as JS source str
    Return a short human-readable result string (or object). Keep it bounded (≈20s).
    May be an empty array for read-only modules (e.g. logs).
 
-3) render — (data) => "<html string>". Runs in the BROWSER. Returns the FULL page body.
-   - Inline styles only. No external URLs/scripts/images/fonts. NO EMOJI anywhere.
+3) render — (data) => "<html string>". Runs in the BROWSER. Returns ONLY the inner HTML of the module body.
+   - ONLY inline \`style="..."\` attributes. NEVER output <style>, <script>, <link>, <html>, <head>,
+     <body>, or <meta> — a stray <style>/<script> corrupts the ENTIRE page (breaks the sidebar/layout).
+     No CSS classes, no global rules. No external URLs/images/fonts. NO EMOJI anywhere.
+   - It must FIT its container — never widen the page. Do not set fixed pixel widths on top-level
+     wrappers; use width:100% and let it flow. For a wide table, wrap it in
+     <div style="overflow-x:auto;max-width:100%"> so it scrolls INSIDE the card instead of stretching it.
    - LIGHT warm "Claude" theme: text #1f1e1d, muted #6b6862, accent #c96442, good #3d8a5f,
      warn #b7791f, bad #bc4b39, hairlines #e7e4db, subtle fill #f3f1ea, card #ffffff.
    - Make it look like a real ops panel: a summary row of headline numbers, then dense
@@ -364,10 +399,19 @@ const MODULE_SCHEMA = {
   additionalProperties: false,
 };
 
-async function generateModule({ presetId, prompt, hint, keepId, onEvent }) {
+async function generateModule({ presetId, prompt, hint, keepId, improveFrom, note, onEvent }) {
   const preset = PRESETS.find((p) => p.id === presetId);
   let user;
-  if (preset) {
+  if (improveFrom) {
+    const actionsSrc = Object.entries(improveFrom.actions || {}).map(([n, c]) => ({ name: n, code: c }));
+    user =
+      `修复并改进现有模块「${improveFrom.title}」。在保持整体设计与功能的前提下把它修好，返回修正后的【完整】模块（不要从零重写成完全不同的东西）。\n` +
+      (note ? `需要解决的问题 / 改进要求：${note}\n` : '请先自查 collect / actions / render 是否有语法或逻辑错误并修复。\n') +
+      `\n下面是当前实现：\n` +
+      `--- 当前 collect ---\n${improveFrom.collect}\n` +
+      `--- 当前 actions ---\n${JSON.stringify(actionsSrc)}\n` +
+      `--- 当前 render ---\n${improveFrom.render}\n`;
+  } else if (preset) {
     user = `Build the "${preset.title}" module.\n目标：${preset.brief}\n`;
   } else if (prompt) {
     user = `Build ONE operations module for this request:\n"""${prompt}"""\n`;
@@ -375,11 +419,16 @@ async function generateModule({ presetId, prompt, hint, keepId, onEvent }) {
     user = `Build ONE genuinely useful operations module for this machine.`;
   }
   if (hint) user += `\n用户对上一版不满意，请据此改进并做出明显不同：“${hint}”。\n`;
-  user += `\nWrite complete, working collect / actions / render. Operational (real per-row buttons where it makes sense). No emoji. Return via the schema.`;
+  user += `\nWrite complete, working collect / actions / render. Every function must be valid, parseable JS. Operational (real per-row buttons where it makes sense). No emoji. Return via the schema.`;
 
-  const raw = await streamJSON({ system: moduleSystem(), user, schema: MODULE_SCHEMA, onEvent });
+  const raw = await streamJSON({ system: moduleSystem(), user, schema: MODULE_SCHEMA, maxTokens: 32000, onEvent });
 
-  const id = keepId || (preset && preset.id) || (typeof raw.id === 'string' && raw.id.trim()) || 'mod-' + Math.random().toString(36).slice(2, 8);
+  const id =
+    keepId ||
+    (improveFrom && improveFrom.id) ||
+    (preset && preset.id) ||
+    (typeof raw.id === 'string' && raw.id.trim()) ||
+    'mod-' + Math.random().toString(36).slice(2, 8);
   let refreshMs = Number.isFinite(raw.refreshMs) ? Math.max(0, Math.min(raw.refreshMs, 3600000)) : 8000;
   if (refreshMs && refreshMs < 2000) refreshMs = 2000;
   const actions = {};
@@ -567,7 +616,7 @@ async function handleApi(req, res, url) {
     return stream.end();
   }
 
-  const m = pathname.match(/^\/api\/module\/([^/]+)(?:\/(run|action|regenerate))?$/);
+  const m = pathname.match(/^\/api\/module\/([^/]+)(?:\/(run|action|regenerate|improve))?$/);
   if (m) {
     const id = decodeURIComponent(m[1]);
     const sub = m[2];
@@ -621,6 +670,28 @@ async function handleApi(req, res, url) {
           onEvent: (e) => stream.send(e),
         });
         if (prev && prev.category && !mod.category) mod.category = prev.category;
+        modules.set(id, mod);
+        saveModules();
+        stream.send({ t: 'done', module: moduleFull(mod) });
+      } catch (e) {
+        stream.send({ t: 'error', e: String(e.message || e) });
+      }
+      return stream.end();
+    }
+    if (sub === 'improve' && method === 'POST') {
+      if (!session.apiKey) throw httpError(401, '未连接 LLM：请先填写 API Key');
+      const prev = modules.get(id);
+      if (!prev) throw httpError(404, 'module not found');
+      const b = await readBody(req);
+      const stream = startStream(res);
+      try {
+        const mod = await generateModule({
+          improveFrom: prev,
+          note: b.note || b.hint || undefined,
+          keepId: id,
+          onEvent: (e) => stream.send(e),
+        });
+        if (prev.category && !mod.category) mod.category = prev.category;
         modules.set(id, mod);
         saveModules();
         stream.send({ t: 'done', module: moduleFull(mod) });

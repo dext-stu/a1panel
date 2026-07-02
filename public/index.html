@@ -192,6 +192,7 @@
       <div class="vh-meta"><div class="vh-title" id="viewTitle"></div><div class="vh-sub" id="viewSub"></div></div>
       <div class="vh-tools">
         <button id="refreshBtn">刷新</button>
+        <button id="improveBtn">改进</button>
         <button id="regenBtn">重写</button>
         <button class="ghost" id="delBtn">删除</button>
       </div>
@@ -220,6 +221,15 @@ function toast(msg) {
   clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 3000);
 }
 function escapeHtml(s){ return String(s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+// Strip anything that could leak out of the module and restyle/break the whole
+// page (the model is told inline-styles-only; this enforces it).
+function sanitizeHtml(html){
+  return String(html)
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<link\b[^>]*>/gi, '')
+    .replace(/<\/?(?:html|head|body|meta|base|title)\b[^>]*>/gi, '');
+}
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -270,13 +280,15 @@ let currentRefreshMs = 0;
 let baseSub = '';
 let refreshTimer = null;
 let busyAction = false;
+let lastError = null;          // last render/collect error for the active module (for 改进)
+let currentCompileError = null;
 
 function metaFromModule(m) {
   return { id: m.id, title: m.title, category: m.category || '', refreshMs: m.refreshMs, actions: m.actions || [], generated: true, createdAt: m.createdAt };
 }
 function compileRender(src) {
-  try { return new Function('data', '"use strict"; const r = (' + src + '); return r(data);'); }
-  catch (e) { return () => '<div class="state bad">render 编译失败：' + escapeHtml(e.message) + '</div>'; }
+  try { return { fn: new Function('data', '"use strict"; const r = (' + src + '); return r(data);') }; }
+  catch (e) { const msg = 'render 编译失败：' + e.message; return { fn: () => '<div class="state bad">' + escapeHtml(msg) + '</div>', error: msg }; }
 }
 function presetTitle(id) { const p = presets.find(x => x.id === id); return p ? p.title : ''; }
 
@@ -309,7 +321,7 @@ function setHead(title, sub) {
   $('#viewTitle').textContent = title;
   $('#viewSub').textContent = sub || '';
 }
-function enableTools(on) { for (const id of ['#refreshBtn', '#regenBtn', '#delBtn']) $(id).disabled = !on; }
+function enableTools(on) { for (const id of ['#refreshBtn', '#improveBtn', '#regenBtn', '#delBtn']) $(id).disabled = !on; }
 
 // ---- selecting / opening ----
 async function selectModule(id) {
@@ -335,7 +347,8 @@ async function openModule(id) {
 }
 
 function showModule(module) {
-  renderFn = compileRender(module.render);
+  const c = compileRender(module.render);
+  renderFn = c.fn; currentCompileError = c.error || null; lastError = c.error || null;
   currentRefreshMs = module.refreshMs || 0;
   baseSub = (module.category ? module.category + ' · ' : '') +
             (currentRefreshMs >= 2000 ? ('每 ' + Math.round(currentRefreshMs / 1000) + 's 自动刷新') : '手动刷新');
@@ -350,10 +363,15 @@ async function runCollect() {
     const res = await api('/api/module/' + encodeURIComponent(id) + '/run');
     if (id !== activeId) return;
     const body = $('#viewBody');
-    if (!res.ok) { body.innerHTML = '<div class="state bad">采集失败：' + escapeHtml(res.error || '未知错误') + '</div>'; }
-    else {
-      let html; try { html = renderFn(res.data); } catch (e) { html = '<div class="state bad">render 执行出错：' + escapeHtml(e.message) + '</div>'; }
-      body.innerHTML = (html == null ? '' : String(html));
+    if (!res.ok) {
+      body.innerHTML = '<div class="state bad">采集失败：' + escapeHtml(res.error || '未知错误') + '</div>';
+      lastError = '采集失败：' + (res.error || '未知错误');
+    } else {
+      let html, execErr = null;
+      try { html = renderFn(res.data); }
+      catch (e) { execErr = 'render 执行出错：' + e.message; html = '<div class="state bad">' + escapeHtml(execErr) + '</div>'; }
+      body.innerHTML = execErr ? html : sanitizeHtml(html == null ? '' : String(html));
+      lastError = currentCompileError || execErr || null;
       $('#viewSub').textContent = baseSub + ' · 更新于 ' + new Date().toLocaleTimeString() + ' · ' + res.ms + 'ms';
     }
   } catch (e) {
@@ -441,6 +459,7 @@ $('#delBtn').onclick = async () => {
   try { await api('/api/module/' + encodeURIComponent(id), { method: 'DELETE' }); } catch (e) { toast(e.message); }
   modules.delete(id); showWelcome();
 };
+$('#improveBtn').onclick = () => openModal('improve');
 $('#regenBtn').onclick = () => openModal('regen');
 $('#addBtn').onclick = () => openModal('new');
 
@@ -448,13 +467,17 @@ $('#addBtn').onclick = () => openModal('new');
 let modalMode = 'new';
 function openModal(mode) {
   modalMode = mode;
-  const regen = mode === 'regen';
-  $('#modalTitle').textContent = regen ? '重写当前模块' : '新建模块';
-  $('#modalSub').textContent = regen
+  const regen = mode === 'regen', improve = mode === 'improve';
+  $('#modalTitle').textContent = improve ? '改进 / 修复当前模块' : regen ? '重写当前模块' : '新建模块';
+  $('#modalSub').textContent = improve
+    ? '在保持当前设计的前提下修复问题。检测到的报错已自动填入，可直接生成，也可补充说明。'
+    : regen
     ? '说说哪里不满意或想要什么改进，AI 会重写这个模块（留空则直接换一版）。'
     : '用一句话描述你想要的运维模块，AI 会现场写出采集、操作与展示代码。';
-  $('#modalInput').value = '';
-  $('#modalInput').placeholder = regen
+  $('#modalInput').value = improve ? (lastError || '') : '';
+  $('#modalInput').placeholder = improve
+    ? '例如：render 编译失败：Unexpected token ")" / 数据没显示出来'
+    : regen
     ? '例如：加上每个容器的 CPU/内存占用 / 表格太挤 / 增加“查看日志”'
     : '例如：Redis 管理：连接数、内存、慢查询，并能清空指定库';
   $('#modalBg').classList.add('show');
@@ -467,7 +490,10 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal()
 $('#modalOk').onclick = async () => {
   const text = $('#modalInput').value.trim();
   closeModal();
-  if (modalMode === 'regen') {
+  if (modalMode === 'improve') {
+    if (!activeId) return;
+    await streamModule('/api/module/' + encodeURIComponent(activeId) + '/improve', { note: text || undefined }, $('#viewTitle').textContent);
+  } else if (modalMode === 'regen') {
     if (!activeId) return;
     await streamModule('/api/module/' + encodeURIComponent(activeId) + '/regenerate', { hint: text || undefined }, $('#viewTitle').textContent);
   } else {
