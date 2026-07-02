@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>a1panel · AI 运维面板</title>
+<style>
+  :root {
+    --bg: #f5f4ee; --card: #ffffff; --card-2: #faf9f5; --side: #fbfaf6;
+    --border: #e7e4db; --fill: #f3f1ea;
+    --text: #1f1e1d; --muted: #6b6862; --faint: #8f8b83;
+    --accent: #c96442; --accent-ink: #a34e30; --accent-soft: #f0e7e1;
+    --good: #3d8a5f; --warn: #b7791f; --bad: #bc4b39;
+    --shadow: 0 1px 2px rgba(31,30,29,.04), 0 8px 24px rgba(31,30,29,.06);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.55 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", Roboto, Helvetica, Arial, sans-serif;
+    min-height: 100%;
+  }
+  button {
+    font: inherit; color: var(--text); background: var(--card);
+    border: 1px solid var(--border); border-radius: 9px; padding: 8px 14px;
+    cursor: pointer; transition: .15s; white-space: nowrap;
+  }
+  button:hover { background: var(--fill); border-color: #d9d5c9; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { background: var(--accent-ink); border-color: var(--accent-ink); }
+  button.ghost { background: transparent; border-color: transparent; color: var(--muted); }
+  button.ghost:hover { background: var(--fill); color: var(--text); }
+  input, select, textarea {
+    font: inherit; color: var(--text); background: var(--card);
+    border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px; width: 100%;
+  }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(201,100,66,.12); }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+
+  /* entry screens */
+  .screen { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+  .card-lg { width: 100%; max-width: 440px; background: var(--card); border: 1px solid var(--border);
+             border-radius: 16px; box-shadow: var(--shadow); padding: 30px; }
+  .wordmark { font-size: 20px; font-weight: 650; letter-spacing: -.01em; }
+  .wordmark .tld { color: var(--accent); }
+  .sub { color: var(--muted); margin: 8px 0 24px; font-size: 13px; }
+  .field { margin-bottom: 15px; }
+  .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .hint { font-size: 12px; color: var(--faint); margin-top: 16px; line-height: 1.7; }
+  .err { color: var(--bad); font-size: 13px; margin-top: 12px; min-height: 18px; }
+  .reveal { background: #fbf3ee; border: 1px solid #eccdbf; border-radius: 11px; padding: 14px 16px; margin-bottom: 20px; }
+  .reveal .label { font-size: 12px; color: var(--accent-ink); font-weight: 600; margin-bottom: 8px; }
+  .reveal .pw { font-size: 17px; word-break: break-all; background: #fff; border: 1px solid #eccdbf; border-radius: 8px; padding: 9px 11px; }
+  .reveal .warn { font-size: 12px; color: var(--muted); margin-top: 9px; }
+
+  /* app shell: sidebar + view */
+  #app { display: none; min-height: 100vh; }
+  #app.on { display: flex; }
+  .side { width: 232px; flex-shrink: 0; background: var(--side); border-right: 1px solid var(--border);
+          position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; padding: 16px 12px; gap: 10px; }
+  .side-brand { font-weight: 650; font-size: 16px; padding: 4px 8px 2px; letter-spacing: -.01em; }
+  .side-brand .tld { color: var(--accent); font-weight: 500; font-size: 12px; }
+  .side-nav { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+  .nav-item { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border-radius: 9px; cursor: pointer; font-size: 13.5px; }
+  .nav-item:hover { background: var(--fill); }
+  .nav-item.active { background: var(--accent-soft); color: var(--accent-ink); font-weight: 600; }
+  .nav-dot { width: 6px; height: 6px; border-radius: 50%; border: 1.5px solid #cbc7bc; flex-shrink: 0; }
+  .nav-item.gen .nav-dot { background: var(--good); border-color: var(--good); }
+  .nav-item.active .nav-dot { background: var(--accent); border-color: var(--accent); }
+  .nav-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .side-add { width: 100%; }
+  .side-foot { border-top: 1px solid var(--border); padding-top: 10px; display: flex; flex-direction: column; gap: 7px; }
+  .side-badge { font-size: 11.5px; color: var(--muted); }
+  .side-badge b { color: var(--text); font-weight: 600; }
+  .side-foot-btns { display: flex; gap: 6px; }
+  .side-foot-btns button { flex: 1; font-size: 12px; padding: 6px; }
+
+  .view { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .view-head { position: sticky; top: 0; z-index: 10; background: rgba(245,244,238,.86); backdrop-filter: blur(8px);
+               border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; padding: 14px 24px; }
+  .vh-meta { flex: 1; min-width: 0; }
+  .vh-title { font-size: 17px; font-weight: 650; letter-spacing: -.01em; }
+  .vh-sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .vh-tools { display: flex; gap: 8px; }
+  .vh-tools button { padding: 6px 12px; font-size: 13px; }
+  .view-body { flex: 1; padding: 24px; overflow: auto; }
+
+  .welcome { max-width: 560px; margin: 64px auto; text-align: center; color: var(--muted); }
+  .welcome .big { font-size: 22px; font-weight: 650; letter-spacing: -.01em; color: var(--text); }
+  .welcome p { margin: 12px 0 0; line-height: 1.7; }
+
+  /* default styling so AI-rendered content looks consistent even if unstyled */
+  .view-body table { border-collapse: collapse; width: 100%; }
+  .view-body th, .view-body td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); font-size: 13px; vertical-align: middle; }
+  .view-body th { color: var(--muted); font-weight: 600; font-size: 11.5px; letter-spacing: .02em; }
+  .view-body [data-action] { font: inherit; cursor: pointer; border: 1px solid var(--border); background: #fff;
+                             color: var(--text); border-radius: 7px; padding: 4px 10px; font-size: 12.5px; margin: 0 2px; }
+  .view-body [data-action]:hover { background: var(--fill); }
+  .view-body [data-action]:disabled { opacity: .5; cursor: default; }
+
+  /* shared states */
+  .state { color: var(--muted); display: flex; align-items: center; gap: 10px; }
+  .state.bad { color: var(--bad); }
+  .spin { width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--accent);
+          border-radius: 50%; animation: spin .7s linear infinite; flex-shrink: 0; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* live generation console */
+  .gen { display: flex; flex-direction: column; gap: 10px; max-width: 900px; }
+  .genhead { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
+  .genlabel { flex: 1; }
+  .gentime { font-variant-numeric: tabular-nums; color: var(--faint); }
+  .genlog { margin: 0; max-height: 320px; overflow: auto; background: var(--card); border: 1px solid var(--border);
+            border-radius: 10px; padding: 12px 14px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 12px; line-height: 1.55; color: var(--faint); white-space: pre-wrap; word-break: break-word; }
+  .genlog .think { color: var(--accent-ink); }
+  .genlog:empty { display: none; }
+
+  /* modal */
+  .modal-bg { position: fixed; inset: 0; background: rgba(31,30,29,.28); display: none; place-items: center; z-index: 50; padding: 20px; }
+  .modal-bg.show { display: grid; }
+  .modal { width: 100%; max-width: 520px; background: var(--card); border: 1px solid var(--border);
+           border-radius: 15px; box-shadow: var(--shadow); padding: 22px; }
+  .modal h3 { margin: 0 0 5px; }
+  .modal p { color: var(--muted); margin: 0 0 16px; font-size: 13px; }
+  .modal textarea { min-height: 84px; resize: vertical; }
+  .modal .actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+
+  #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--text); color: #fff;
+           padding: 10px 16px; border-radius: 10px; box-shadow: var(--shadow); font-size: 13px; max-width: 80vw;
+           opacity: 0; pointer-events: none; transition: .25s; z-index: 100; }
+  #toast.show { opacity: .96; bottom: 28px; }
+</style>
+</head>
+<body>
+
+<!-- ===== LOGIN ===== -->
+<div id="login" class="screen" style="display:none">
+  <div class="card-lg">
+    <div class="wordmark">a1panel<span class="tld"> · AI 运维面板</span></div>
+    <p class="sub">由 AI 亲手编写的服务器运维面板。请先登录。</p>
+    <div id="revealBox" class="reveal" style="display:none">
+      <div class="label">初始登录密码（仅显示这一次，请立即保存）</div>
+      <div class="pw mono" id="revealPw"></div>
+      <div class="warn">此密码只会出现这一次；离开或刷新后将无法再次查看。忘记可删除 auth.json 后重启以重新生成。</div>
+    </div>
+    <div class="field"><label>登录密码</label><input id="loginPw" type="password" placeholder="输入密码" autocomplete="off" /></div>
+    <button class="primary" id="loginBtn" style="width:100%">登录</button>
+    <div class="err" id="loginErr"></div>
+    <div class="hint">首次启动时，初始密码也会打印在运行 <code>node server.js</code> 的终端里。</div>
+  </div>
+</div>
+
+<!-- ===== CONNECT ===== -->
+<div id="connect" class="screen" style="display:none">
+  <div class="card-lg">
+    <div class="wordmark">a1panel<span class="tld"> · 连接模型</span></div>
+    <p class="sub">面板通过与 Anthropic Messages API 兼容的接口生成运维模块。可用官方地址，也可填写自定义网关地址与模型。</p>
+    <div class="field"><label>Base URL</label><input id="baseUrl" type="text" value="https://api.anthropic.com" spellcheck="false" /></div>
+    <div class="field"><label>API Key</label><input id="apiKey" type="password" placeholder="sk-ant-... 或你的网关密钥" autocomplete="off" /></div>
+    <div class="field"><label>模型（可自定义）</label>
+      <input id="model" type="text" list="modelList" value="claude-sonnet-5" spellcheck="false" />
+      <datalist id="modelList">
+        <option value="claude-sonnet-5"></option><option value="claude-opus-4-8"></option>
+        <option value="claude-fable-5"></option><option value="claude-haiku-4-5"></option>
+      </datalist>
+    </div>
+    <button class="primary" id="connectBtn" style="width:100%">连接并启动面板</button>
+    <div class="err" id="connectErr"></div>
+    <div class="hint">API Key 只保存在服务进程内存中，不写入磁盘。<br>面板会执行 AI 生成的代码来读取并操作本机；请只在你自己的机器上运行、不要暴露到公网。</div>
+  </div>
+</div>
+
+<!-- ===== APP ===== -->
+<div id="app">
+  <aside class="side">
+    <div class="side-brand">a1panel<span class="tld"> 运维</span></div>
+    <nav class="side-nav" id="sideNav"></nav>
+    <button class="side-add" id="addBtn">＋ 新建模块</button>
+    <div class="side-foot">
+      <div class="side-badge">主机 <b id="hostBadge">-</b></div>
+      <div class="side-badge">模型 <b id="modelBadge">-</b></div>
+      <div class="side-foot-btns">
+        <button class="ghost" id="disconnectBtn">断开</button>
+        <button class="ghost" id="logoutBtn">退出</button>
+      </div>
+    </div>
+  </aside>
+  <main class="view">
+    <div class="view-head" id="viewHead" style="display:none">
+      <div class="vh-meta"><div class="vh-title" id="viewTitle"></div><div class="vh-sub" id="viewSub"></div></div>
+      <div class="vh-tools">
+        <button id="refreshBtn">刷新</button>
+        <button id="regenBtn">重写</button>
+        <button class="ghost" id="delBtn">删除</button>
+      </div>
+    </div>
+    <div class="view-body" id="viewBody"></div>
+  </main>
+</div>
+
+<!-- modal -->
+<div class="modal-bg" id="modalBg">
+  <div class="modal">
+    <h3 id="modalTitle">新建模块</h3>
+    <p id="modalSub">用一句话描述你想要的运维模块，AI 会现场写出采集、操作与展示代码。</p>
+    <textarea id="modalInput"></textarea>
+    <div class="actions"><button class="ghost" id="modalCancel">取消</button><button class="primary" id="modalOk">生成</button></div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const $ = (s, r=document) => r.querySelector(s);
+let toastTimer;
+function toast(msg) {
+  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 3000);
+}
+function escapeHtml(s){ return String(s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    method: opts.method || 'GET',
+    headers: opts.body ? { 'content-type': 'application/json' } : undefined,
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) { const e = new Error(data.error || ('HTTP ' + res.status)); e.status = res.status; throw e; }
+  return data;
+}
+async function streamRequest(path, body, onEvent) {
+  const res = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  if (!res.ok || !res.body) {
+    const d = await res.json().catch(() => ({}));
+    const e = new Error(d.error || ('HTTP ' + res.status)); e.status = res.status; throw e;
+  }
+  const reader = res.body.getReader(), dec = new TextDecoder();
+  let buf = '', result = null;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
+      if (!line) continue;
+      let ev; try { ev = JSON.parse(line); } catch { continue; }
+      if (ev.t === 'done') result = ev.module;
+      else if (ev.t === 'error') { const e = new Error(ev.e); e.gen = true; throw e; }
+      else if (onEvent) onEvent(ev);
+    }
+  }
+  if (!result) throw new Error('生成未完成（连接中断）');
+  return result;
+}
+function show(which) {
+  for (const id of ['login', 'connect']) $('#' + id).style.display = (id === which ? 'grid' : 'none');
+  $('#app').classList.toggle('on', which === 'app');
+}
+
+// ---- state ----
+let presets = [];
+let modules = new Map();      // id -> meta
+let activeId = null;
+let renderFn = null;
+let currentRefreshMs = 0;
+let baseSub = '';
+let refreshTimer = null;
+let busyAction = false;
+
+function metaFromModule(m) {
+  return { id: m.id, title: m.title, category: m.category || '', refreshMs: m.refreshMs, actions: m.actions || [], generated: true, createdAt: m.createdAt };
+}
+function compileRender(src) {
+  try { return new Function('data', '"use strict"; const r = (' + src + '); return r(data);'); }
+  catch (e) { return () => '<div class="state bad">render 编译失败：' + escapeHtml(e.message) + '</div>'; }
+}
+function presetTitle(id) { const p = presets.find(x => x.id === id); return p ? p.title : ''; }
+
+function buildSidebar() {
+  const nav = $('#sideNav'); nav.innerHTML = '';
+  const presetIds = new Set(presets.map(p => p.id));
+  const items = presets.map(p => ({ id: p.id, title: p.title, gen: modules.has(p.id) }));
+  for (const m of modules.values()) if (!presetIds.has(m.id)) items.push({ id: m.id, title: m.title, gen: true });
+  for (const it of items) {
+    const div = document.createElement('div');
+    div.className = 'nav-item' + (it.gen ? ' gen' : '') + (it.id === activeId ? ' active' : '');
+    div.innerHTML = '<span class="nav-dot"></span><span class="nav-title"></span>';
+    div.querySelector('.nav-title').textContent = it.title;
+    div.onclick = () => selectModule(it.id);
+    nav.appendChild(div);
+  }
+}
+
+function showWelcome() {
+  activeId = null; buildSidebar();
+  $('#viewHead').style.display = 'none';
+  $('#viewBody').innerHTML =
+    '<div class="welcome"><div class="big">选择一个模块开始</div>' +
+    '<p>从左侧点开任意模块，AI 会在你<strong>首次打开时</strong>为这台机器现场生成它（可读取信息、也能执行操作），' +
+    '之后<strong>永久保留</strong>，再次打开即秒开。也可以点「＋ 新建模块」用一句话定制。</p></div>';
+}
+
+function setHead(title, sub) {
+  $('#viewHead').style.display = 'flex';
+  $('#viewTitle').textContent = title;
+  $('#viewSub').textContent = sub || '';
+}
+function enableTools(on) { for (const id of ['#refreshBtn', '#regenBtn', '#delBtn']) $(id).disabled = !on; }
+
+// ---- selecting / opening ----
+async function selectModule(id) {
+  if (busyAction) return;
+  activeId = id; buildSidebar();
+  clearTimeout(refreshTimer);
+  const meta = modules.get(id);
+  if (meta && meta.generated) await openModule(id);
+  else await streamModule('/api/module', { presetId: id }, presetTitle(id) || 'AI 模块');
+}
+
+async function openModule(id) {
+  try {
+    const { module } = await api('/api/module/' + encodeURIComponent(id));
+    if (id !== activeId) return;
+    showModule(module);
+    await runCollect();
+  } catch (e) {
+    if (e.status === 401) return handleAuthLoss(e);
+    if (e.status === 404) { modules.delete(id); buildSidebar(); showWelcome(); return; }
+    $('#viewBody').innerHTML = '<div class="state bad">' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+function showModule(module) {
+  renderFn = compileRender(module.render);
+  currentRefreshMs = module.refreshMs || 0;
+  baseSub = (module.category ? module.category + ' · ' : '') +
+            (currentRefreshMs >= 2000 ? ('每 ' + Math.round(currentRefreshMs / 1000) + 's 自动刷新') : '手动刷新');
+  setHead(module.title, baseSub);
+  enableTools(true);
+}
+
+async function runCollect() {
+  const id = activeId; if (!id || !renderFn) return;
+  clearTimeout(refreshTimer);
+  try {
+    const res = await api('/api/module/' + encodeURIComponent(id) + '/run');
+    if (id !== activeId) return;
+    const body = $('#viewBody');
+    if (!res.ok) { body.innerHTML = '<div class="state bad">采集失败：' + escapeHtml(res.error || '未知错误') + '</div>'; }
+    else {
+      let html; try { html = renderFn(res.data); } catch (e) { html = '<div class="state bad">render 执行出错：' + escapeHtml(e.message) + '</div>'; }
+      body.innerHTML = (html == null ? '' : String(html));
+      $('#viewSub').textContent = baseSub + ' · 更新于 ' + new Date().toLocaleTimeString() + ' · ' + res.ms + 'ms';
+    }
+  } catch (e) {
+    if (e.status === 401) return handleAuthLoss(e);
+    $('#viewBody').innerHTML = '<div class="state bad">' + escapeHtml(e.message) + '</div>';
+    return;
+  }
+  if (currentRefreshMs >= 2000 && !busyAction && id === activeId)
+    refreshTimer = setTimeout(runCollect, currentRefreshMs);
+}
+
+// ---- generation (streaming) ----
+function viewGenerating() {
+  const body = $('#viewBody');
+  body.innerHTML =
+    '<div class="gen"><div class="genhead"><span class="spin"></span>' +
+    '<span class="genlabel">模型思考中…</span><span class="gentime">0.0s</span></div><pre class="genlog"></pre></div>';
+  const start = performance.now();
+  const timer = setInterval(() => { const t = body.querySelector('.gentime'); if (t) t.textContent = ((performance.now() - start) / 1000).toFixed(1) + 's'; }, 100);
+  let sawText = false;
+  return {
+    onEvent(ev) {
+      const log = body.querySelector('.genlog'); if (!log) return;
+      if (ev.t === 'text' && !sawText) { sawText = true; const l = body.querySelector('.genlabel'); if (l) l.textContent = '正在编写模块代码…'; }
+      const span = document.createElement('span');
+      if (ev.t === 'thinking') span.className = 'think';
+      span.textContent = ev.d;
+      log.appendChild(span);
+      while (log.childNodes.length > 700) log.removeChild(log.firstChild);
+      log.scrollTop = log.scrollHeight;
+    },
+    stop() { clearInterval(timer); },
+  };
+}
+
+async function streamModule(path, body, knownTitle) {
+  setHead(knownTitle || 'AI 模块', '正在生成…'); enableTools(false);
+  const gen = viewGenerating();
+  try {
+    const module = await streamRequest(path, body, (ev) => gen.onEvent(ev));
+    gen.stop();
+    modules.set(module.id, metaFromModule(module));
+    activeId = module.id; buildSidebar();
+    showModule(module);
+    await runCollect();
+    return module;
+  } catch (e) {
+    gen.stop();
+    if (e.status === 401) return handleAuthLoss(e);
+    $('#viewBody').innerHTML = '<div class="state bad">生成失败：' + escapeHtml(e.message) + '</div>';
+    enableTools(true);
+  }
+}
+
+// ---- action execution (event delegation) ----
+$('#viewBody').addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-action]');
+  if (!btn || !activeId) return;
+  const name = btn.getAttribute('data-action');
+  let args = {}; try { args = JSON.parse(btn.getAttribute('data-args') || '{}'); } catch {}
+  const confirmText = btn.getAttribute('data-confirm');
+  if (confirmText && !confirm(confirmText)) return;
+  busyAction = true; clearTimeout(refreshTimer);
+  const label = btn.textContent; btn.disabled = true; btn.textContent = '执行中…';
+  try {
+    const res = await api('/api/module/' + encodeURIComponent(activeId) + '/action', { method: 'POST', body: { name, args } });
+    if (res.ok) toast(typeof res.result === 'string' ? res.result : (res.result && res.result.message) || '操作已完成');
+    else toast('操作失败：' + res.error);
+  } catch (err) {
+    if (err.status === 401) { busyAction = false; return handleAuthLoss(err); }
+    toast('操作失败：' + err.message);
+  } finally {
+    busyAction = false;
+    if (btn.isConnected) { btn.disabled = false; btn.textContent = label; }
+  }
+  runCollect();
+});
+
+// ---- head buttons ----
+$('#refreshBtn').onclick = () => runCollect();
+$('#delBtn').onclick = async () => {
+  if (!activeId) return;
+  if (!confirm('删除该模块？（预置模块下次点开会重新生成）')) return;
+  const id = activeId;
+  try { await api('/api/module/' + encodeURIComponent(id), { method: 'DELETE' }); } catch (e) { toast(e.message); }
+  modules.delete(id); showWelcome();
+};
+$('#regenBtn').onclick = () => openModal('regen');
+$('#addBtn').onclick = () => openModal('new');
+
+// ---- modal ----
+let modalMode = 'new';
+function openModal(mode) {
+  modalMode = mode;
+  const regen = mode === 'regen';
+  $('#modalTitle').textContent = regen ? '重写当前模块' : '新建模块';
+  $('#modalSub').textContent = regen
+    ? '说说哪里不满意或想要什么改进，AI 会重写这个模块（留空则直接换一版）。'
+    : '用一句话描述你想要的运维模块，AI 会现场写出采集、操作与展示代码。';
+  $('#modalInput').value = '';
+  $('#modalInput').placeholder = regen
+    ? '例如：加上每个容器的 CPU/内存占用 / 表格太挤 / 增加“查看日志”'
+    : '例如：Redis 管理：连接数、内存、慢查询，并能清空指定库';
+  $('#modalBg').classList.add('show');
+  setTimeout(() => $('#modalInput').focus(), 50);
+}
+function closeModal() { $('#modalBg').classList.remove('show'); }
+$('#modalCancel').onclick = closeModal;
+$('#modalBg').addEventListener('click', e => { if (e.target === $('#modalBg')) closeModal(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+$('#modalOk').onclick = async () => {
+  const text = $('#modalInput').value.trim();
+  closeModal();
+  if (modalMode === 'regen') {
+    if (!activeId) return;
+    await streamModule('/api/module/' + encodeURIComponent(activeId) + '/regenerate', { hint: text || undefined }, $('#viewTitle').textContent);
+  } else {
+    const id = 'mod-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+    await streamModule('/api/module', { prompt: text || undefined, keepId: id }, text ? text.slice(0, 20) : '新模块');
+  }
+};
+
+// ---- auth loss ----
+function handleAuthLoss(e) {
+  clearTimeout(refreshTimer);
+  if (String(e.message).includes('登录')) { toast('登录已失效，请重新登录'); show('login'); }
+  else { toast('模型连接已断开'); show('connect'); }
+}
+
+// ---- login / connect ----
+async function doLogin() {
+  const pw = $('#loginPw').value, err = $('#loginErr'), btn = $('#loginBtn');
+  err.textContent = '';
+  if (!pw) { err.textContent = '请输入密码'; return; }
+  btn.disabled = true; btn.textContent = '登录中…';
+  try { await api('/api/login', { method: 'POST', body: { password: pw } }); $('#revealBox').style.display = 'none'; await routeAfterLogin(); }
+  catch (e) { err.textContent = e.message; }
+  finally { btn.disabled = false; btn.textContent = '登录'; }
+}
+async function doConnect() {
+  const baseUrl = $('#baseUrl').value.trim(), apiKey = $('#apiKey').value.trim(), model = $('#model').value.trim();
+  const err = $('#connectErr'), btn = $('#connectBtn');
+  err.textContent = '';
+  if (!apiKey) { err.textContent = '请填写 API Key'; return; }
+  if (!model) { err.textContent = '请填写模型名称'; return; }
+  btn.disabled = true; btn.textContent = '连接中…';
+  try { const s = await api('/api/session', { method: 'POST', body: { baseUrl, apiKey, model } }); await enterApp(s); }
+  catch (e) { if (e.status === 401 && String(e.message).includes('登录')) show('login'); else err.textContent = e.message; }
+  finally { btn.disabled = false; btn.textContent = '连接并启动面板'; }
+}
+async function routeAfterLogin() {
+  const s = await api('/api/state');
+  if (s.connected) await enterApp(s);
+  else { $('#baseUrl').value = s.baseUrl || 'https://api.anthropic.com'; $('#model').value = s.model || 'claude-sonnet-5'; show('connect'); }
+}
+async function enterApp(state) {
+  const full = await api('/api/state');
+  presets = full.presets || [];
+  modules = new Map((full.modules || []).map(m => [m.id, m]));
+  $('#hostBadge').textContent = full.host || '-';
+  $('#modelBadge').textContent = full.model || '-';
+  show('app');
+  buildSidebar();
+  showWelcome();
+}
+async function disconnectLLM() {
+  try { await api('/api/disconnect', { method: 'POST' }); } catch {}
+  clearTimeout(refreshTimer); await routeAfterLogin();
+}
+async function logout() { try { await api('/api/panel-logout', { method: 'POST' }); } catch {} location.reload(); }
+
+$('#loginBtn').onclick = doLogin;
+$('#loginPw').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+$('#connectBtn').onclick = doConnect;
+$('#apiKey').addEventListener('keydown', e => { if (e.key === 'Enter') doConnect(); });
+$('#disconnectBtn').onclick = disconnectLLM;
+$('#logoutBtn').onclick = logout;
+
+// bootstrap
+(async () => {
+  try {
+    const b = await api('/api/bootstrap');
+    if (b.authed) await routeAfterLogin();
+    else {
+      if (b.initialPassword) { $('#revealBox').style.display = 'block'; $('#revealPw').textContent = b.initialPassword; }
+      show('login');
+    }
+  } catch { show('login'); }
+})();
+</script>
+</body>
+</html>

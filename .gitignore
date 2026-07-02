@@ -1,0 +1,9 @@
+node_modules/
+
+# runtime state — never commit
+auth.json
+modules.json
+widgets.json
+cookies.txt
+*.log
+.DS_Store

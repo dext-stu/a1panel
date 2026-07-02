@@ -1,0 +1,14 @@
+{
+  "name": "a1panel",
+  "version": "1.0.0",
+  "description": "AI-native server operations panel — every widget is written by Claude at runtime.",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
